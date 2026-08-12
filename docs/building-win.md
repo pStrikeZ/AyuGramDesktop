@@ -1,4 +1,4 @@
-# Build instructions for Windows 64-bit
+# Build instructions for Windows x64
 
 For an AMD64-hosted cross build that targets Windows ARM64, see
 [Building AyuGram Desktop for Windows ARM64](building-winarm.md).
@@ -47,20 +47,32 @@ Run both `Clone source code and prepare libraries` and `Build the project` secti
 
 In the initialized terminal, go to ***BuildPath*** and run
 
-    git clone --recursive https://github.com/AyuGram/AyuGramDesktop.git tdesktop
-    tdesktop\Telegram\build\prepare\win.bat
+    git clone --recursive https://github.com/pStrikeZ/AyuGramDesktop.git tdesktop
+    tdesktop\Telegram\build\prepare\win.bat --target windows-x64 --qt 5
 
 ## Build the project
 
 Go to ***BuildPath*\\tdesktop\\Telegram** and run
 
-    configure.bat x64 -D TDESKTOP_API_ID=2040 -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627
+    configure.bat --target windows-x64 --qt 5 -D TDESKTOP_API_ID=2040 -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627
 
-* Open ***BuildPath*\\tdesktop\\out\\Telegram.slnx** in Visual Studio 2026
+`--qt 5` keeps Windows 7 compatibility. On an x64-only build, use `--qt 6`
+in both commands to build the Qt 6 variant; it has its own dependency and
+output directories.
+
+* Open ***BuildPath*\\tdesktop\\out\\windows-x64-native-qt5\\Telegram.slnx** in Visual Studio 2026
 * Select Telegram project and press Build > Build Telegram (Debug and Release configurations)
-* The result AyuGram.exe will be located in **D:\TBuild\tdesktop\out\Debug** (and **Release**)
+* The result AyuGram.exe will be located in **D:\TBuild\tdesktop\out\windows-x64-native-qt5\\Debug** (and **Release**)
 
 ## Troubleshooting
+
+### Qt version maintenance
+
+The exact Qt source pins live only in `Telegram/build/qt_versions.py`; Windows
+preparation and the Linux container image read that same table. Updating a pin
+does still require a manual review of the matching `qtbase_<version>` patch
+directory in `Libraries/patches`, because upstream source changes can make a
+patch obsolete or incompatible.
 
 ### Error building libvpx
 

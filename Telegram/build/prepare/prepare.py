@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 scriptPath = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(scriptPath + '/..')
 import qt_version
+from build_target import BuildTargetError, parse_build_arguments
 
 def finish(code):
     global executePath
@@ -21,15 +22,19 @@ def nativeToolsError():
 win = (sys.platform == 'win32')
 mac = (sys.platform == 'darwin')
 
-if win and not 'Platform' in os.environ:
-    nativeToolsError()
+try:
+    buildTarget, arguments = parse_build_arguments(sys.argv[1:])
+except BuildTargetError as exception:
+    error(str(exception))
 
-win32 = win and (os.environ['Platform'] == 'x86')
-win64 = win and (os.environ['Platform'] == 'x64')
-winarm = win and (os.environ['Platform'] == 'arm64')
-# `amd64_arm64` is a real cross-build: binaries produced for the target cannot
-# run on the x64 machine that is executing this script.
-winarm_x64_host = winarm and (os.environ.get('VSCMD_ARG_HOST_ARCH', '').lower() in ['amd64', 'x64'])
+if buildTarget and not win:
+    error('Telegram/build/prepare/prepare.py supports the new interface only on Windows.')
+
+win32 = win and buildTarget and buildTarget.arch == 'x86'
+win64 = win and buildTarget and buildTarget.arch == 'x64'
+winarm = win and buildTarget and buildTarget.arch == 'arm64'
+winarm_x64_host = winarm and buildTarget.is_windows_arm64_cross
+winarmcross = winarm_x64_host
 
 arch = ''
 if win32:
@@ -37,8 +42,8 @@ if win32:
 elif win64:
     arch = 'x64'
 elif winarm:
-    arch = 'arm'
-if not qt_version.resolve(arch):
+    arch = 'arm64'
+if not qt_version.resolve(arch, buildTarget.qt_major if buildTarget else None):
     error('Usupported platform.')
 
 qt = os.environ.get('QT')
@@ -52,7 +57,8 @@ if win and not win32 and not win64 and not winarm:
 os.chdir(scriptPath + '/../../../..')
 
 pathSep = ';' if win else ':'
-libsLoc = 'Libraries' if not win64 else (os.path.join('Libraries', 'win64'))
+libsLoc = os.path.join('Libraries', buildTarget.key) if buildTarget else (
+    'Libraries' if not win64 else os.path.join('Libraries', 'win64'))
 keysLoc = 'cache_keys'
 
 rootDir = os.getcwd()
@@ -61,14 +67,13 @@ thirdPartyDir = os.path.realpath(os.path.join(rootDir, 'ThirdParty'))
 usedPrefix = os.path.realpath(os.path.join(libsDir, 'local'))
 
 optionsList = [
-    'qt6',
     'skip-release',
     'build-stackwalk',
 ]
 options = []
 runCommand = []
 customRunCommand = False
-for arg in sys.argv[1:]:
+for arg in arguments:
     if customRunCommand:
         runCommand.append(arg)
     if arg in optionsList:
@@ -132,11 +137,22 @@ elif (mac):
         'CMAKE_GENERATOR': 'Ninja',
     })
 
+if buildTarget:
+    environment.update({
+        'BUILD_TARGET': buildTarget.target,
+        'BUILD_MODE': buildTarget.mode,
+        'QT_MAJOR': str(buildTarget.qt_major),
+    })
+
 ignoreInCacheForThirdParty = [
     'USED_PREFIX',
     'LIBS_DIR',
     'SPECIAL_TARGET',
     'X8664',
+    'HOST_X8664',
+    'BUILD_TARGET',
+    'BUILD_MODE',
+    'QT_MAJOR',
 ]
 
 environmentKeyString = ''
@@ -250,6 +266,8 @@ def filterByPlatform(commands):
             if win64 and 'win64' in scopes:
                 inscope = True
             if winarm and 'winarm' in scopes:
+                inscope = True
+            if winarmcross and 'winarmcross' in scopes:
                 inscope = True
             if mac and 'mac' in scopes:
                 inscope = True
@@ -371,7 +389,7 @@ getch = _Getch()
 def runStages():
     onlyStages = []
     rebuildStale = False
-    for arg in sys.argv[1:]:
+    for arg in arguments:
         if arg in options:
             continue
         elif arg == 'silent':
@@ -555,7 +573,7 @@ stage('zlib', """
     git checkout e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake . ^
@@ -598,7 +616,7 @@ stage('mozjpeg', """
 win:
     SET "MOZJPEG_ARM_ARGS="
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     rem mozjpeg 4.1.5 detects the x64 host and adds NASM objects even when
     rem CMake is targeting ARM64. Use its portable C implementation instead.
     SET "MOZJPEG_ARM_ARGS=-DWITH_SIMD=OFF"
@@ -691,7 +709,7 @@ stage('opus', """
     cd opus
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake -B out . ^
@@ -718,7 +736,7 @@ stage('rnnoise', """
     cd out
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake .. %CMAKE_CROSS_COMPILE_ARGS% -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>"
@@ -788,17 +806,18 @@ winarm:
     rem dav1d's armasm64 path cannot assemble this release with MSVC 14.44.
     rem The portable C decoder works correctly and avoids creating a Git commit.
     SET "DAV1D_ASM_DISABLE=-Denable_asm=false"
+winarmcross:
     rem Keep the ARM64 compiler in the cross file while Meson itself runs
     rem under an AMD64 environment for build-machine feature probes.
     SET "ARM64_MSVC_BIN=%VCToolsInstallDir%bin\\Hostx64\\arm64"
 win:
     set FILE=cross-file.txt
     echo [binaries] > %FILE%
-winarm:
+winarmcross:
     echo c = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
     echo cpp = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
     echo ar = '%ARM64_MSVC_BIN:\\=/%/lib.exe' >> %FILE%
-!winarm:
+!winarmcross:
     echo c = 'cl' >> %FILE%
     echo cpp = 'cl' >> %FILE%
     echo ar = 'lib' >> %FILE%
@@ -809,7 +828,7 @@ win:
     echo cpu_family = '%TARGET%' >> %FILE%
     echo cpu = '%TARGET%' >> %FILE%
     echo endian = 'little' >> %FILE%
-winarm:
+winarmcross:
     echo [properties] >> %FILE%
     echo needs_exe_wrapper = true >> %FILE%
 
@@ -825,7 +844,7 @@ release:
 win:
     copy %LIBS_DIR%\\local\\lib\\libdav1d.a %LIBS_DIR%\\local\\lib\\dav1d.lib
     deactivate
-winarm:
+winarmcross:
     "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
 mac:
     buildOneArch() {
@@ -861,6 +880,7 @@ win64:
     SET "TARGET=x86_64"
 winarm:
     SET "TARGET=aarch64"
+winarmcross:
     SET "PATH=%LIBS_DIR%\\gas-preprocessor;%PATH%"
     rem Meson runs on AMD64; keep its target compilers explicit.
     SET "ARM64_MSVC_BIN=%VCToolsInstallDir%bin\\Hostx64\\arm64"
@@ -870,16 +890,16 @@ winarm:
     rem subdirectory before Meson is configured.
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i "/subdir('console')/d" codec/meson.build
     SET "OPENH264_CROSS_OPTIONS=-Dtests=disabled"
-!winarm:
+!winarmcross:
     SET "OPENH264_CROSS_OPTIONS="
 win:
     set FILE=cross-file.txt
     echo [binaries] > %FILE%
-winarm:
+winarmcross:
     echo c = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
     echo cpp = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
     echo ar = '%ARM64_MSVC_BIN:\\=/%/lib.exe' >> %FILE%
-!winarm:
+!winarmcross:
     echo c = 'cl' >> %FILE%
     echo cpp = 'cl' >> %FILE%
     echo ar = 'lib' >> %FILE%
@@ -890,12 +910,12 @@ win:
     echo cpu_family = '%TARGET%' >> %FILE%
     echo cpu = '%TARGET%' >> %FILE%
     echo endian = 'little' >> %FILE%
-winarm:
+winarmcross:
     echo [properties] >> %FILE%
     echo needs_exe_wrapper = true >> %FILE%
 
 depends:python/Scripts/activate.bat
-winarm:
+winarmcross:
     "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
 win:
     %THIRDPARTY_DIR%\\python\\Scripts\\activate.bat
@@ -909,7 +929,7 @@ release:
 win:
     copy %LIBS_DIR%\\local\\lib\\libopenh264.a %LIBS_DIR%\\local\\lib\\openh264.lib
     deactivate
-winarm:
+winarmcross:
     "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
 mac:
     buildOneArch() {
@@ -939,7 +959,7 @@ stage('libavif', """
     cd libavif
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake . ^
@@ -973,7 +993,7 @@ stage('libde265', """
     cd libde265
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake . ^
@@ -1049,7 +1069,7 @@ stage('libheif', """
     cd libheif
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i 's/LIBHEIF_EXPORTS/LIBDE265_STATIC_BUILD/g' libheif/CMakeLists.txt
@@ -1133,7 +1153,7 @@ stage('libjxl', """
 """) + """
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake . ^
@@ -1224,7 +1244,7 @@ stage('liblcms2', """
     cd liblcms2
 win:
     SET "LCMS2_CROSS_FILE="
-winarm:
+winarmcross:
     SET "LCMS2_CROSS_FILE=--cross-file cross-file.txt"
     rem Meson runs on AMD64; keep its target compilers explicit.
     SET "ARM64_MSVC_BIN=%VCToolsInstallDir%bin\\Hostx64\\arm64"
@@ -1244,7 +1264,7 @@ winarm:
     echo needs_exe_wrapper = true >> %FILE%
 win:
 depends:python/Scripts/activate.bat
-winarm:
+winarmcross:
     "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
 win:
     %THIRDPARTY_DIR%\\python\\Scripts\\activate.bat
@@ -1300,6 +1320,8 @@ depends:patches/ffmpeg.patch
 
     SET "ARCH_PARAM="
 winarm:
+    SET "ARCH_PARAM=--arch=aarch64 --target-os=win32"
+winarmcross:
     SET "ARCH_PARAM=--arch=aarch64 --target-os=win32 --enable-cross-compile"
 win:
 depends:patches/build_ffmpeg_win.sh
@@ -1473,7 +1495,7 @@ stage('openal-soft', """
 win:
     git checkout 291c0fdbbd
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake -B build . ^
@@ -1815,7 +1837,7 @@ win:
     SET "LCMS2_CONFIG=Debug"
 release:
     SET "LCMS2_CONFIG=Release"
-winarm:
+winarmcross:
     SET "QT_CROSS_COMPILE_ARGS=-D CMAKE_SYSTEM_NAME=Windows -D CMAKE_SYSTEM_PROCESSOR=ARM64 -D QT_HOST_PATH=%LIBS_DIR%\\Qt-%QT%-host"
 win:
     """ + removeDir('"%LIBS_DIR%\\Qt' + qt + '"') + """
@@ -1881,7 +1903,7 @@ stage('tg_owt', """
     git submodule update --init --recursive
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     SET MOZJPEG_PATH=$LIBS_DIR/mozjpeg
@@ -1981,7 +2003,7 @@ stage('ada', """
     cd ada
 win:
     SET "CMAKE_CROSS_COMPILE_ARGS="
-winarm:
+winarmcross:
     SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
 win:
     cmake -B out . ^
@@ -2035,7 +2057,7 @@ win:
     mkdir build
     cd build
     SET "PROTOBUF_TARGET_BINARIES=ON"
-winarm:
+winarmcross:
     rem The ARM64 target only needs protobuf libraries. Code generation uses
     rem protobuf_host/protoc.exe, so do not create an un-runnable target protoc.
     SET "PROTOBUF_TARGET_BINARIES=OFF"
@@ -2075,7 +2097,7 @@ win:
     SET OPENSSL_LIBS_DIR=%OPENSSL_DIR%\\out
     SET ZLIB_LIBS_DIR=%LIBS_DIR%\\zlib
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed -i "s/STREQUAL/MATCHES/" td/generate/CMakeLists.txt
-winarm:
+winarmcross:
     rem TDLib requires its source generators to run on the build host. Generate
     rem the sources with x64 tools before configuring the ARM64 target build.
     mkdir out
@@ -2094,7 +2116,7 @@ winarm:
     mkdir Debug
     cd Debug
     cmake ^
-winarm:
+winarmcross:
         -DCMAKE_SYSTEM_NAME=Windows ^
         -DCMAKE_SYSTEM_PROCESSOR=ARM64 ^
 win:
@@ -2120,7 +2142,7 @@ release_win:
     mkdir Release
     cd Release
     cmake ^
-release_winarm:
+release_winarmcross:
         -DCMAKE_SYSTEM_NAME=Windows ^
         -DCMAKE_SYSTEM_PROCESSOR=ARM64 ^
 release_win:

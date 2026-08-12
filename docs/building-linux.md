@@ -8,8 +8,12 @@ Choose a folder for the future build, for example **/home/user/TBuild**. It will
 
 Install [poetry](https://python-poetry.org), [docker](https://www.docker.com/) and [docker-buildx](https://docs.docker.com/reference/cli/docker/buildx/), go to ***BuildPath*** and run
 
-    git clone --recursive https://github.com/AyuGram/AyuGramDesktop.git tdesktop
-    ./tdesktop/Telegram/build/prepare/linux.sh
+    git clone --recursive https://github.com/pStrikeZ/AyuGramDesktop.git tdesktop
+    ./tdesktop/Telegram/build/prepare/linux.sh --target linux-x64 --qt 6
+
+Use `linux-arm64` instead on an ARM64 Linux device. Linux cross compilation is
+reserved by this interface but is deliberately rejected for now: build on the
+matching native architecture instead.
 
 ### Building the project
 
@@ -20,6 +24,7 @@ Go to ***BuildPath*/tdesktop** and run
         -v "$PWD:/usr/src/tdesktop" \
         ghcr.io/telegramdesktop/tdesktop/centos_env:latest \
         /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+        --target linux-x64 --qt 6 \
         -D TDESKTOP_API_ID=2040 \
         -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627
 
@@ -31,10 +36,12 @@ Or, to create a debug build, run
         -e CONFIG=Debug \
         ghcr.io/telegramdesktop/tdesktop/centos_env:latest \
         /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh \
+        --target linux-x64 --qt 6 \
         -D TDESKTOP_API_ID=2040 \
         -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627
 
-The built files will be in the `out` directory.
+The built files will be in `out/linux-x64-native-qt6` (or the equivalent ARM64
+directory), separate from other targets and Qt variants.
 
 You can use `strip` command to reduce binary size.
 

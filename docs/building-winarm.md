@@ -1,9 +1,8 @@
 # Building AyuGram Desktop for Windows ARM64
 
-This document describes a **cross build from an AMD64 Windows host to a
-Windows ARM64 target**. It produces an ARM64 `AyuGram.exe`, while every build
-time code generator remains a native AMD64 executable that can run on the
-build host.
+Windows ARM64 supports both an **AMD64-to-ARM64 cross build** and an **ARM64
+native build on Windows on Arm**. Select the path through `--mode` (or omit it
+for automatic detection); all commands state the output target explicitly.
 
 The build intentionally produces both Debug and Release dependencies. Build
 the Release client to get the normal end-user performance profile.
@@ -15,11 +14,11 @@ Use Visual Studio 2026 and Windows SDK `10.0.26100.0`, as described in
 install the MSVC ARM64 build tools. The required compiler is
 `Hostx64/arm64/cl.exe` from the v14.44 toolset.
 
-From the build root, create `ThirdParty` and `Libraries`, clone recursively,
-and initialise the ARM64 cross environment:
+From the build root, create `ThirdParty` and `Libraries`, clone recursively.
+For an AMD64-to-ARM64 cross build, initialise this environment:
 
 ```bat
-git clone --recursive https://github.com/AyuGram/AyuGramDesktop.git tdesktop
+git clone --recursive https://github.com/pStrikeZ/AyuGramDesktop.git tdesktop
 %comspec% /k "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
 ```
 
@@ -29,31 +28,41 @@ instead.
 The important part is `amd64_arm64`: `amd64` is the architecture that runs
 the build tools and `arm64` is the architecture of the output.
 
+On a Windows on Arm device, instead open an ARM64 Native Tools terminal (or
+run `vcvarsall.bat arm64 -vcvars_ver=14.44`). In that case the host tools and
+the application are both ARM64 and can run directly on the device.
+
 ## Build dependencies
 
 From the build root, run:
 
 ```bat
-tdesktop\Telegram\build\prepare\win.bat silent
+tdesktop\Telegram\build\prepare\win.bat --target windows-arm64 --mode cross --qt 6 silent
 ```
+
+For a native Windows on Arm build, use `--mode native` instead. Omitting
+`--mode` chooses the matching mode from the Visual Studio environment.
 
 Do not pass `skip-release` when preparing a Release client. The script builds
 the ARM64 Debug and optimized `RelWithDebInfo` Qt libraries (and ARM64 Release
 libraries for other dependencies) and also creates these native AMD64 host
 tools:
 
-- Qt tools (`moc`, `rcc`, `qsb`, and others) in `Libraries\Qt-*-host`;
+- Qt tools (`moc`, `rcc`, `qsb`, and others) in `Libraries\windows-arm64-cross-qt6\Qt-*-host`;
 - `codegen_emoji.exe`, `codegen_lang.exe`, and `codegen_style.exe` in
-  `Libraries\host_codegen\Debug`;
-- `protoc.exe` in `Libraries\protobuf_host\build\Debug`;
-- the tde2e/TDLib source generators in `Libraries\tde2e\out\host`.
+  `Libraries\windows-arm64-cross-qt6\host_codegen\Debug`;
+- `protoc.exe` in `Libraries\windows-arm64-cross-qt6\protobuf_host\build\Debug`;
+- the tde2e/TDLib source generators in `Libraries\windows-arm64-cross-qt6\tde2e\out\host`.
 
 Those host tools being Debug binaries is intentional. They run only while
 building and do not affect the performance of the target application. The
 target libraries and `AyuGram.exe` built for the Release configuration are
 ARM64. Qt's `RelWithDebInfo` configuration is still optimized; it merely keeps
 debug information, and is mapped only to the application's `Release`
-configuration.
+configuration during an AMD64-to-ARM64 cross build.
+
+On a native Windows on Arm build there is no separate x64 host-tool tree:
+ARM64 tools are built in the target Qt/dependency tree and execute locally.
 
 ### Avoiding `machine type mismatch` dialogs
 
@@ -78,18 +87,18 @@ Use the same `amd64_arm64` terminal and configure the project:
 
 ```bat
 cd tdesktop\Telegram
-configure.bat arm -D TDESKTOP_API_ID=2040 -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627
+configure.bat --target windows-arm64 --mode cross --qt 6 -D TDESKTOP_API_ID=2040 -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627
 cd ..
-cmake --build out --config Release --target Telegram
+cmake --build out\windows-arm64-cross-qt6 --config Release --target Telegram
 ```
 
 The result is:
 
 ```
-tdesktop\out\Release\AyuGram.exe
+tdesktop\out\windows-arm64-cross-qt6\Release\AyuGram.exe
 ```
 
-`winarm` is selected automatically by `configure.bat arm`. The project uses
+`winarm` is selected automatically from `--target windows-arm64`. The project uses
 the native host tools for all custom commands, so an AMD64 machine never tries
 to execute an ARM64 generator.
 
@@ -98,8 +107,8 @@ to execute an ARM64 generator.
 Use `dumpbin` from the Visual Studio toolset:
 
 ```bat
-dumpbin /headers tdesktop\out\Release\AyuGram.exe | findstr /i "machine"
-dumpbin /headers Libraries\host_codegen\Debug\codegen_emoji.exe | findstr /i "machine"
+dumpbin /headers tdesktop\out\windows-arm64-cross-qt6\Release\AyuGram.exe | findstr /i "machine"
+dumpbin /headers Libraries\windows-arm64-cross-qt6\host_codegen\Debug\codegen_emoji.exe | findstr /i "machine"
 ```
 
 Expected values are `AA64 machine (ARM64)` for `AyuGram.exe` and `8664 machine
@@ -112,32 +121,3 @@ The public repository deliberately does not contain
 private keys. The `Packer` target is therefore excluded for the local `winarm`
 cross target. This does not affect building or running `AyuGram.exe`; it only
 prevents creation of signed update packages.
-
-## Committing the CMake submodule changes
-
-`tdesktop/cmake` is a Git submodule. The main repository stores only a commit
-identifier for it (a *gitlink*), not the files in its working tree. Therefore
-the following order is required:
-
-```bat
-cd tdesktop\cmake
-git switch -c winarm-cross-build
-git add run_cmake.py host_tools.cmake host_codegen external\cld3 external\cmark_gfm external\qt
-git commit -m "Add Windows ARM64 cross-build host tools"
-git push -u <your-cmake-fork> winarm-cross-build
-
-cd ..
-git add cmake
-git add CMakeLists.txt Telegram docs .gitignore
-git commit -m "Add Windows ARM64 cross-build workflow"
-git push
-```
-
-For a PR to the upstream projects, first merge or otherwise publish the CMake
-submodule commit to a repository reachable from the main project's submodule
-URL. Then commit the updated `cmake` gitlink in the main repository.
-
-If the main repository must be self-contained under a personal fork, change
-the `cmake` URL in `.gitmodules` to the corresponding CMake fork and commit
-both `.gitmodules` and the new gitlink. A parent-repository commit alone
-cannot preserve uncommitted submodule edits.

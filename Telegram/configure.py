@@ -13,6 +13,7 @@ sys.path.append(scriptPath + '/../cmake')
 import run_cmake
 sys.path.append(scriptPath + '/build')
 import qt_version
+from build_target import BuildTargetError, parse_build_arguments
 
 executePath = os.getcwd()
 def finish(code):
@@ -29,14 +30,18 @@ if sys.platform == 'win32' and 'COMSPEC' not in os.environ:
 
 scriptName = os.path.basename(scriptPath)
 
-arguments = sys.argv[1:]
-
 officialTarget = ''
 officialTargetFile = scriptPath + '/build/target'
 if os.path.isfile(officialTargetFile):
     with open(officialTargetFile, 'r') as f:
         for line in f:
             officialTarget = line.strip()
+
+try:
+    buildTarget, arguments = parse_build_arguments(
+        sys.argv[1:], allow_implicit=bool(officialTarget))
+except BuildTargetError as exception:
+    error(str(exception))
 
 arch = ''
 if officialTarget in ['win', 'uwp']:
@@ -45,16 +50,13 @@ elif officialTarget in ['win64', 'uwp64']:
     arch = 'x64'
 elif officialTarget in ['winarm', 'uwparm']:
     arch = 'arm'
-if arch == '':
-    for argument in arguments:
-        if argument in ['x86', 'x64', 'arm']:
-            arch = argument
-            break
-if not qt_version.resolve(arch):
-    error('Unsupported platform.')
 
-if 'qt6' in arguments:
-    arguments.remove('qt6')
+if buildTarget:
+    if officialTarget:
+        error('Official build targets cannot be combined with --target.')
+    arch = buildTarget.arch
+if not qt_version.resolve(arch, buildTarget.qt_major if buildTarget else None):
+    error('Unsupported platform.')
 
 if officialTarget != '':
     officialApiIdFile = scriptPath + '/../../DesktopPrivate/custom_api_id.h'
@@ -68,11 +70,9 @@ if officialTarget != '':
                 arguments.append('-DTDESKTOP_API_ID=' + apiIdMatch.group(1))
             elif apiHashMatch:
                 arguments.append('-DTDESKTOP_API_HASH=' + apiHashMatch.group(1))
-    if arch != '':
+    if arch:
         arguments.append(arch)
-elif arch == 'arm' and not any(
-        argument.startswith('-DDESKTOP_APP_SPECIAL_TARGET=')
-        for argument in arguments):
-    arguments.append('-DDESKTOP_APP_SPECIAL_TARGET=winarm')
+elif buildTarget and buildTarget.target_platform == 'windows':
+    arguments.append('-DDESKTOP_APP_SPECIAL_TARGET=' + buildTarget.special_target)
 
-finish(run_cmake.run(scriptName, arguments))
+finish(run_cmake.run(scriptName, arguments, buildTarget=buildTarget))

@@ -18,7 +18,8 @@ fi
 HomePath="$FullScriptPath/../.."
 cd $HomePath
 
-ProjectPath="$HomePath/../out"
+eval "$(python3 "$HomePath/Telegram/build/build_target.py" linux-environment "$@")"
+ProjectPath="$HomePath/../out/$BUILD_KEY"
 ReleasePath="$ProjectPath/Release"
 BinaryName="Telegram"
 
@@ -26,7 +27,7 @@ if ! command -v cmake >/dev/null 2>&1; then
   ln -s cmake3 /usr/bin/cmake
 fi
 
-./configure.sh -DDESKTOP_APP_ENABLE_LTO=ON
+./configure.sh "$@" -DDESKTOP_APP_ENABLE_LTO=ON
 
 cd $ProjectPath
 cmake --build . --config Release --target Telegram
