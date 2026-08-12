@@ -55,6 +55,7 @@ stage
 .idea/
 cmake-build-debug/
 *.qsb
+__pycache__/
 
 # Local configuration files
 settings.local.json

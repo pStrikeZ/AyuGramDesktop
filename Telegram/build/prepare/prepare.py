@@ -27,6 +27,9 @@ if win and not 'Platform' in os.environ:
 win32 = win and (os.environ['Platform'] == 'x86')
 win64 = win and (os.environ['Platform'] == 'x64')
 winarm = win and (os.environ['Platform'] == 'arm64')
+# `amd64_arm64` is a real cross-build: binaries produced for the target cannot
+# run on the x64 machine that is executing this script.
+winarm_x64_host = winarm and (os.environ.get('VSCMD_ARG_HOST_ARCH', '').lower() in ['amd64', 'x64'])
 
 arch = ''
 if win32:
@@ -115,6 +118,10 @@ elif (winarm):
         'SPECIAL_TARGET': 'winarm',
         'X8664': 'ARM64',
     })
+    if (winarm_x64_host):
+        environment.update({
+            'HOST_X8664': 'x64',
+        })
 elif (mac):
     environment.update({
         'SPECIAL_TARGET': 'mac',
@@ -547,7 +554,12 @@ stage('zlib', """
     cd zlib
     git checkout e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
         -DCMAKE_C_FLAGS="/DZLIB_WINAPI" ^
         -DZLIB_BUILD_SHARED=OFF ^
@@ -584,10 +596,20 @@ stage('mozjpeg', """
     git clone -b v4.1.5 https://github.com/mozilla/mozjpeg.git
     cd mozjpeg
 win:
+    SET "MOZJPEG_ARM_ARGS="
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    rem mozjpeg 4.1.5 detects the x64 host and adds NASM objects even when
+    rem CMake is targeting ARM64. Use its portable C implementation instead.
+    SET "MOZJPEG_ARM_ARGS=-DWITH_SIMD=OFF"
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ^
         -DWITH_JPEG8=ON ^
-        -DPNG_SUPPORTED=OFF
+        -DPNG_SUPPORTED=OFF ^
+        %MOZJPEG_ARM_ARGS%
     cmake --build . --config Debug
 release:
     cmake --build . --config Release
@@ -668,10 +690,16 @@ stage('opus', """
     git clone -b v1.5.2 https://github.com/xiph/opus.git
     cd opus
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake -B out . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -DCMAKE_INSTALL_PREFIX=%LIBS_DIR%/local ^
         -DOPUS_STATIC_RUNTIME=ON
     cmake --build out --config Debug
+release:
     cmake --build out --config Release
     cmake --install out --config Release
 mac:
@@ -689,7 +717,11 @@ stage('rnnoise', """
     mkdir out
     cd out
 win:
-    cmake .. -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
+    cmake .. %CMAKE_CROSS_COMPILE_ARGS% -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>"
     cmake --build . --config Debug
 release:
     cmake --build . --config Release
@@ -753,22 +785,33 @@ win64:
     SET "DAV1D_ASM_DISABLE="
 winarm:
     SET "TARGET=aarch64"
-    SET "DAV1D_ASM_DISABLE="
-    SET "PATH=%LIBS_DIR%\\gas-preprocessor;%PATH%"
-    echo armasm64 fails with 'syntax error in expression: tbnz x14, #4, 8f' as if this instruction is unknown/unsupported.
-    git revert --no-edit d503bb0ccaf104b2f13da0f092e09cc9411b3297
+    rem dav1d's armasm64 path cannot assemble this release with MSVC 14.44.
+    rem The portable C decoder works correctly and avoids creating a Git commit.
+    SET "DAV1D_ASM_DISABLE=-Denable_asm=false"
+    rem Keep the ARM64 compiler in the cross file while Meson itself runs
+    rem under an AMD64 environment for build-machine feature probes.
+    SET "ARM64_MSVC_BIN=%VCToolsInstallDir%bin\\Hostx64\\arm64"
 win:
     set FILE=cross-file.txt
     echo [binaries] > %FILE%
+winarm:
+    echo c = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
+    echo cpp = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
+    echo ar = '%ARM64_MSVC_BIN:\\=/%/lib.exe' >> %FILE%
+!winarm:
     echo c = 'cl' >> %FILE%
     echo cpp = 'cl' >> %FILE%
     echo ar = 'lib' >> %FILE%
+win:
     echo windres = 'rc' >> %FILE%
     echo [host_machine] >> %FILE%
     echo system = 'windows' >> %FILE%
     echo cpu_family = '%TARGET%' >> %FILE%
     echo cpu = '%TARGET%' >> %FILE%
     echo endian = 'little' >> %FILE%
+winarm:
+    echo [properties] >> %FILE%
+    echo needs_exe_wrapper = true >> %FILE%
 
 depends:python/Scripts/activate.bat
     %THIRDPARTY_DIR%\\python\\Scripts\\activate.bat
@@ -776,12 +819,14 @@ depends:python/Scripts/activate.bat
     meson compile -C builddir-debug
     meson install -C builddir-debug
 release:
-    meson setup --cross-file %FILE% --prefix %LIBS_DIR%/local --default-library=static --buildtype=release -Denable_tools=false -Denable_tests=false -Db_vscrt=mt builddir-release
+    meson setup --cross-file %FILE% --prefix %LIBS_DIR%/local --default-library=static --buildtype=release -Denable_tools=false -Denable_tests=false %DAV1D_ASM_DISABLE% -Db_vscrt=mt builddir-release
     meson compile -C builddir-release
     meson install -C builddir-release
 win:
     copy %LIBS_DIR%\\local\\lib\\libdav1d.a %LIBS_DIR%\\local\\lib\\dav1d.lib
     deactivate
+winarm:
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
 mac:
     buildOneArch() {
         arch=$1
@@ -817,31 +862,55 @@ win64:
 winarm:
     SET "TARGET=aarch64"
     SET "PATH=%LIBS_DIR%\\gas-preprocessor;%PATH%"
+    rem Meson runs on AMD64; keep its target compilers explicit.
+    SET "ARM64_MSVC_BIN=%VCToolsInstallDir%bin\\Hostx64\\arm64"
+    rem OpenH264's Meson build otherwise creates ARM64 console programs.
+    rem They are not product dependencies and cannot run on this x64 host.
+    rem Its source has no console-build option, so omit that disposable source
+    rem subdirectory before Meson is configured.
+    %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i "/subdir('console')/d" codec/meson.build
+    SET "OPENH264_CROSS_OPTIONS=-Dtests=disabled"
+!winarm:
+    SET "OPENH264_CROSS_OPTIONS="
 win:
     set FILE=cross-file.txt
     echo [binaries] > %FILE%
+winarm:
+    echo c = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
+    echo cpp = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
+    echo ar = '%ARM64_MSVC_BIN:\\=/%/lib.exe' >> %FILE%
+!winarm:
     echo c = 'cl' >> %FILE%
     echo cpp = 'cl' >> %FILE%
     echo ar = 'lib' >> %FILE%
+win:
     echo windres = 'rc' >> %FILE%
     echo [host_machine] >> %FILE%
     echo system = 'windows' >> %FILE%
     echo cpu_family = '%TARGET%' >> %FILE%
     echo cpu = '%TARGET%' >> %FILE%
     echo endian = 'little' >> %FILE%
+winarm:
+    echo [properties] >> %FILE%
+    echo needs_exe_wrapper = true >> %FILE%
 
 depends:python/Scripts/activate.bat
+winarm:
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
+win:
     %THIRDPARTY_DIR%\\python\\Scripts\\activate.bat
-    meson setup --cross-file %FILE% --prefix %LIBS_DIR%/local --default-library=static --buildtype=debug -Db_vscrt=mtd builddir-debug
+    meson setup --cross-file %FILE% --prefix %LIBS_DIR%/local --default-library=static --buildtype=debug -Db_vscrt=mtd %OPENH264_CROSS_OPTIONS% builddir-debug
     meson compile -C builddir-debug
     meson install -C builddir-debug
 release:
-    meson setup --cross-file %FILE% --prefix %LIBS_DIR%/local --default-library=static --buildtype=release -Db_vscrt=mt builddir-release
+    meson setup --cross-file %FILE% --prefix %LIBS_DIR%/local --default-library=static --buildtype=release -Db_vscrt=mt %OPENH264_CROSS_OPTIONS% builddir-release
     meson compile -C builddir-release
     meson install -C builddir-release
 win:
     copy %LIBS_DIR%\\local\\lib\\libopenh264.a %LIBS_DIR%\\local\\lib\\openh264.lib
     deactivate
+winarm:
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
 mac:
     buildOneArch() {
         arch=$1
@@ -869,7 +938,12 @@ stage('libavif', """
     git clone -b v1.4.2 https://github.com/AOMediaCodec/libavif.git
     cd libavif
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -DCMAKE_INSTALL_PREFIX=%LIBS_DIR%/local ^
         -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
         -DCMAKE_POLICY_DEFAULT_CMP0091=NEW ^
@@ -898,7 +972,12 @@ stage('libde265', """
     git clone -b v1.1.1 https://github.com/strukturag/libde265.git
     cd libde265
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -DCMAKE_INSTALL_PREFIX=%LIBS_DIR%/local ^
         -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
         -DCMAKE_POLICY_DEFAULT_CMP0091=NEW ^
@@ -969,11 +1048,16 @@ stage('libheif', """
     git clone -b v1.23.1 https://github.com/strukturag/libheif.git
     cd libheif
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i 's/LIBHEIF_EXPORTS/LIBDE265_STATIC_BUILD/g' libheif/CMakeLists.txt
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i 's/HAVE_VISIBILITY/LIBHEIF_STATIC_BUILD/g' libheif/CMakeLists.txt
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i 's/LIBHEIF_EXPORTS/LIBDE265_STATIC_BUILD/g' heifio/CMakeLists.txt
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i 's/HAVE_VISIBILITY/LIBHEIF_STATIC_BUILD/g' heifio/CMakeLists.txt
     cmake . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -DCMAKE_INSTALL_PREFIX=%LIBS_DIR%/local ^
         -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
         -DBUILD_SHARED_LIBS=OFF ^
@@ -1048,7 +1132,12 @@ stage('libjxl', """
     -DJPEGXL_WARNINGS_AS_ERRORS=OFF
 """) + """
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -DCMAKE_INSTALL_PREFIX=%LIBS_DIR%/local ^
         -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" ^
         -DCMAKE_C_FLAGS="/DJXL_STATIC_DEFINE /DJXL_THREADS_STATIC_DEFINE /DJXL_CMS_STATIC_DEFINE" ^
@@ -1134,12 +1223,37 @@ stage('liblcms2', """
     git clone -b lcms2.16 https://github.com/mm2/Little-CMS.git liblcms2
     cd liblcms2
 win:
+    SET "LCMS2_CROSS_FILE="
+winarm:
+    SET "LCMS2_CROSS_FILE=--cross-file cross-file.txt"
+    rem Meson runs on AMD64; keep its target compilers explicit.
+    SET "ARM64_MSVC_BIN=%VCToolsInstallDir%bin\\Hostx64\\arm64"
+    rem LCMS's Meson file unconditionally adds a test executable. It is not
+    rem required by Qt and cannot be linked or run by the AMD64 build host.
+    %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i "/subdir('testbed')/d" meson.build
+    set FILE=cross-file.txt
+    echo [binaries] > %FILE%
+    echo c = '%ARM64_MSVC_BIN:\\=/%/cl.exe' >> %FILE%
+    echo ar = '%ARM64_MSVC_BIN:\\=/%/lib.exe' >> %FILE%
+    echo [host_machine] >> %FILE%
+    echo system = 'windows' >> %FILE%
+    echo cpu_family = 'aarch64' >> %FILE%
+    echo cpu = 'aarch64' >> %FILE%
+    echo endian = 'little' >> %FILE%
+    echo [properties] >> %FILE%
+    echo needs_exe_wrapper = true >> %FILE%
+win:
 depends:python/Scripts/activate.bat
+winarm:
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
+win:
     %THIRDPARTY_DIR%\\python\\Scripts\\activate.bat
-    meson setup --default-library=static --buildtype=debug -Db_vscrt=mtd out/Debug
+    meson setup %LCMS2_CROSS_FILE% --default-library=static --buildtype=debug -Db_vscrt=mtd out/Debug
     meson compile -C out/Debug
-    meson setup --default-library=static --buildtype=release -Db_vscrt=mt out/Release
+release:
+    meson setup %LCMS2_CROSS_FILE% --default-library=static --buildtype=release -Db_vscrt=mt out/Release
     meson compile -C out/Release
+win:
     deactivate
 mac:
     buildOneArch() {
@@ -1186,7 +1300,7 @@ depends:patches/ffmpeg.patch
 
     SET "ARCH_PARAM="
 winarm:
-    SET "ARCH_PARAM=--arch=aarch64"
+    SET "ARCH_PARAM=--arch=aarch64 --target-os=win32 --enable-cross-compile"
 win:
 depends:patches/build_ffmpeg_win.sh
     bash --login ../patches/build_ffmpeg_win.sh
@@ -1358,7 +1472,12 @@ stage('openal-soft', """
     cd openal-soft
 win:
     git checkout 291c0fdbbd
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake -B build . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -D LIBTYPE:STRING=STATIC ^
         -D FORCE_STATIC_VCRT=ON ^
         -D ALSOFT_UTILS=OFF ^
@@ -1502,6 +1621,57 @@ release:
     lipo -create Release.arm64/libcrashpad_client.a Release.x86_64/libcrashpad_client.a -output Release/libcrashpad_client.a
 """)
 
+if (winarm_x64_host):
+    host_qt_branch = 'v$QT' + ('-lts-lgpl' if qt.startswith('6.2.') else '')
+    stage('qt_host_' + qt, """
+    git clone -b """ + host_qt_branch + """ https://github.com/qt/qt5.git qt_host_$QT
+    cd qt_host_$QT
+    git submodule update --init --recursive --progress qtbase qtimageformats qtshadertools qtsvg
+depends:patches/qtbase_""" + qt + """/*.patch
+win:
+    cd qtbase
+    setlocal enabledelayedexpansion
+    for /r %%i in (..\\..\\patches\\qtbase_%QT%\\*) do (
+        git apply %%i -v
+        if errorlevel 1 (
+            echo ERROR: Applying patch %%~nxi failed!
+            exit /b 1
+        )
+    )
+    cd ..
+
+    """ + removeDir('"%LIBS_DIR%\\Qt-' + qt + '-host"') + """
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
+    configure -prefix "%LIBS_DIR%\\Qt-%QT%-host" ^
+        -debug ^
+        -force-debug-info ^
+        -opensource ^
+        -confirm-license ^
+    -static ^
+    -static-runtime ^
+    -feature-c++20 ^
+    -opengl desktop ^
+    -no-openssl ^
+        -nomake examples ^
+        -nomake tests ^
+        -platform win32-msvc
+    cmake --build . --config Debug
+    cmake --install . --config Debug
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
+""")
+
+    stage('host_codegen', """
+win:
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
+    mkdir host_codegen
+    cd host_codegen
+    cmake "%ROOT_DIR%\\tdesktop\\cmake\\host_codegen" ^
+        -DDESKTOP_APP_CODEGEN_SOURCE_DIR="%ROOT_DIR%\\tdesktop\\Telegram\\codegen" ^
+        -DDESKTOP_APP_HOST_QT_PATH="%LIBS_DIR%\\Qt-%QT%-host"
+    cmake --build . --config Debug
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
+""")
+
 if qt < '6':
     if win:
         stage('tg_angle', """
@@ -1641,6 +1811,13 @@ win:
 release:
     SET CONFIGURATIONS=-debug-and-release
 win:
+    SET "QT_CROSS_COMPILE_ARGS="
+    SET "LCMS2_CONFIG=Debug"
+release:
+    SET "LCMS2_CONFIG=Release"
+winarm:
+    SET "QT_CROSS_COMPILE_ARGS=-D CMAKE_SYSTEM_NAME=Windows -D CMAKE_SYSTEM_PROCESSOR=ARM64 -D QT_HOST_PATH=%LIBS_DIR%\\Qt-%QT%-host"
+win:
     """ + removeDir('"%LIBS_DIR%\\Qt' + qt + '"') + """
     SET MOZJPEG_DIR=%LIBS_DIR%\\mozjpeg
     SET OPENSSL_DIR=%LIBS_DIR%\\openssl3
@@ -1685,12 +1862,16 @@ win:
         -D WebP_mux_LIBRARY="%WEBP_DIR%\\out\\release-static\\$X8664\\lib\\webpmux.lib" ^
         -D LCMS2_FOUND=1 ^
         -D LCMS2_INCLUDE_DIR="%LCMS2_DIR%\\include" ^
-        -D LCMS2_LIBRARIES="%LCMS2_DIR%\\out\\Release\\src\\liblcms2.a"
+        -D LCMS2_LIBRARIES="%LCMS2_DIR%\\out\\%LCMS2_CONFIG%\\src\\liblcms2.a" ^
+        %QT_CROSS_COMPILE_ARGS%
 
     cmake --build . --config Debug
     cmake --install . --config Debug
-    cmake --build .
-    cmake --install .
+release:
+    rem Qt maps -debug-and-release to RelWithDebInfo and Debug when
+    rem -force-debug-info is enabled.
+    cmake --build . --config RelWithDebInfo
+    cmake --install . --config RelWithDebInfo
 """)
 
 stage('tg_owt', """
@@ -1699,13 +1880,17 @@ stage('tg_owt', """
     git checkout 89df288dd6ba5b2ec95b3c5eaf1e7e0c3a870fc4
     git submodule update --init --recursive
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     SET MOZJPEG_PATH=$LIBS_DIR/mozjpeg
     SET OPUS_PATH=$USED_PREFIX/include/opus
     SET OPENSSL_PATH=$LIBS_DIR/openssl3/include
     SET LIBVPX_PATH=$USED_PREFIX/include
     SET OPENH264_PATH=$USED_PREFIX/include
     SET FFMPEG_PATH=$LIBS_DIR/ffmpeg
-    cmake -B out \
+    cmake -B out %CMAKE_CROSS_COMPILE_ARGS% \
         -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>" \
         -DTG_OWT_BUILD_AUDIO_BACKENDS=OFF \
         -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \
@@ -1795,7 +1980,12 @@ stage('ada', """
     git clone -b v3.2.4 https://github.com/ada-url/ada.git
     cd ada
 win:
+    SET "CMAKE_CROSS_COMPILE_ARGS="
+winarm:
+    SET "CMAKE_CROSS_COMPILE_ARGS=-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64"
+win:
     cmake -B out . ^
+        %CMAKE_CROSS_COMPILE_ARGS% ^
         -D ADA_TESTING=OFF ^
         -D ADA_TOOLS=OFF ^
         -D ADA_INCLUDE_URL_PATTERN=OFF ^
@@ -1812,6 +2002,28 @@ mac:
     cmake --install build
 """)
 
+if (winarm_x64_host):
+    stage('protobuf_host', """
+win:
+    git clone --recursive -b v21.9 https://github.com/protocolbuffers/protobuf protobuf_host
+    cd protobuf_host
+    git clone https://github.com/abseil/abseil-cpp third_party/abseil-cpp
+    cd third_party/abseil-cpp
+    git checkout 273292d1cf
+    cd ../..
+    mkdir build
+    cd build
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
+    cmake .. ^
+        -Dprotobuf_BUILD_TESTS=OFF ^
+        -Dprotobuf_BUILD_PROTOBUF_BINARIES=ON ^
+        -Dprotobuf_BUILD_LIBPROTOC=ON ^
+        -Dprotobuf_WITH_ZLIB_DEFAULT=OFF ^
+        -Dprotobuf_DEBUG_POSTFIX=""
+    cmake --build . --config Debug
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
+""")
+
 stage('protobuf', """
 win:
     git clone --recursive -b v21.9 https://github.com/protocolbuffers/protobuf
@@ -1822,14 +2034,21 @@ win:
     cd ../..
     mkdir build
     cd build
+    SET "PROTOBUF_TARGET_BINARIES=ON"
+winarm:
+    rem The ARM64 target only needs protobuf libraries. Code generation uses
+    rem protobuf_host/protoc.exe, so do not create an un-runnable target protoc.
+    SET "PROTOBUF_TARGET_BINARIES=OFF"
+win:
     cmake .. ^
         -Dprotobuf_BUILD_TESTS=OFF ^
-        -Dprotobuf_BUILD_PROTOBUF_BINARIES=ON ^
-        -Dprotobuf_BUILD_LIBPROTOC=ON ^
+        -Dprotobuf_BUILD_PROTOBUF_BINARIES=%PROTOBUF_TARGET_BINARIES% ^
+        -Dprotobuf_BUILD_LIBPROTOC=%PROTOBUF_TARGET_BINARIES% ^
         -Dprotobuf_WITH_ZLIB_DEFAULT=OFF ^
         -Dprotobuf_DEBUG_POSTFIX=""
-    cmake --build . --config Release
     cmake --build . --config Debug
+release:
+    cmake --build . --config Release
 """)
 # mac:
 #     git clone --recursive -b v21.9 https://github.com/protocolbuffers/protobuf
@@ -1856,11 +2075,29 @@ win:
     SET OPENSSL_LIBS_DIR=%OPENSSL_DIR%\\out
     SET ZLIB_LIBS_DIR=%LIBS_DIR%\\zlib
     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed -i "s/STREQUAL/MATCHES/" td/generate/CMakeLists.txt
+winarm:
+    rem TDLib requires its source generators to run on the build host. Generate
+    rem the sources with x64 tools before configuring the ARM64 target build.
     mkdir out
+    cd out
+    mkdir host
+    cd host
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64 -vcvars_ver=14.44
+    cmake ^
+        -DTD_GENERATE_SOURCE_FILES=ON ^
+        -DCMAKE_CONFIGURATION_TYPES=Debug ^
+        ../..
+    cmake --build . --config Debug --target prepare_cross_compiling
+    "%VCINSTALLDIR%Auxiliary\\Build\\vcvarsall.bat" amd64_arm64 -vcvars_ver=14.44
+    cd ..\\..
     cd out
     mkdir Debug
     cd Debug
     cmake ^
+winarm:
+        -DCMAKE_SYSTEM_NAME=Windows ^
+        -DCMAKE_SYSTEM_PROCESSOR=ARM64 ^
+win:
         -DOPENSSL_FOUND=1 ^
         -DOPENSSL_INCLUDE_DIR=%OPENSSL_DIR%\\include ^
         -DOPENSSL_CRYPTO_LIBRARY="%OPENSSL_LIBS_DIR%.dbg\\libcrypto.lib" ^
@@ -1878,11 +2115,15 @@ win:
         -DTD_E2E_ONLY=ON ^
         ../..
     cmake --build . --config Debug
-release:
+release_win:
     cd ..
     mkdir Release
     cd Release
     cmake ^
+release_winarm:
+        -DCMAKE_SYSTEM_NAME=Windows ^
+        -DCMAKE_SYSTEM_PROCESSOR=ARM64 ^
+release_win:
         -DOPENSSL_FOUND=1 ^
         -DOPENSSL_INCLUDE_DIR=%OPENSSL_DIR%\\include ^
         -DOPENSSL_CRYPTO_LIBRARY="%OPENSSL_LIBS_DIR%\\libcrypto.lib" ^

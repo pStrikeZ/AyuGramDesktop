@@ -44,6 +44,7 @@ if (NOT DESKTOP_APP_USE_PACKAGED AND WIN32)
 endif()
 
 include(cmake/variables.cmake)
+include(cmake/host_tools.cmake)
 include(cmake/nice_target_sources.cmake)
 include(cmake/target_compile_options_if_exists.cmake)
 include(cmake/target_link_frameworks.cmake)

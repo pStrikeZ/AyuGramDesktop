@@ -13,6 +13,8 @@ endif()
 
 find_program(QSB_EXECUTABLE qsb
     HINTS
+        "${DESKTOP_APP_HOST_QT_PATH}/libexec"
+        "${DESKTOP_APP_HOST_QT_PATH}/bin"
         "${QT_DIR}/../../../libexec"
         "${QT_DIR}/../../../bin"
         "${QT_DIR}/../../qt6/libexec"

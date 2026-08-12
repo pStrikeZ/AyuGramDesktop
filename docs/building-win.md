@@ -1,5 +1,8 @@
 # Build instructions for Windows 64-bit
 
+For an AMD64-hosted cross build that targets Windows ARM64, see
+[Building AyuGram Desktop for Windows ARM64](building-winarm.md).
+
 - [Prepare folder](#prepare-folder)
 - [Install third party software](#install-third-party-software)
 - [Initialize terminal](#initialize-terminal)

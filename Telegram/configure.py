@@ -45,6 +45,11 @@ elif officialTarget in ['win64', 'uwp64']:
     arch = 'x64'
 elif officialTarget in ['winarm', 'uwparm']:
     arch = 'arm'
+if arch == '':
+    for argument in arguments:
+        if argument in ['x86', 'x64', 'arm']:
+            arch = argument
+            break
 if not qt_version.resolve(arch):
     error('Unsupported platform.')
 
@@ -65,5 +70,9 @@ if officialTarget != '':
                 arguments.append('-DTDESKTOP_API_HASH=' + apiHashMatch.group(1))
     if arch != '':
         arguments.append(arch)
+elif arch == 'arm' and not any(
+        argument.startswith('-DDESKTOP_APP_SPECIAL_TARGET=')
+        for argument in arguments):
+    arguments.append('-DDESKTOP_APP_SPECIAL_TARGET=winarm')
 
 finish(run_cmake.run(scriptName, arguments))

@@ -19,7 +19,11 @@ add_subdirectory(lib_qr)
 add_subdirectory(lib_translate)
 add_subdirectory(lib_webrtc)
 add_subdirectory(lib_webview)
-add_subdirectory(codegen)
+if (desktop_app_winarm_x64_cross_host)
+    desktop_app_import_host_codegen()
+else()
+    add_subdirectory(codegen)
+endif()
 
 # AyuGram filters
 add_subdirectory(lib_icu)
@@ -2318,6 +2322,12 @@ if (WIN32)
         target_link_libraries(Telegram PRIVATE desktop-app::win_directx_helper)
     endif()
 
+    # Qt 6 Network's static ARM64 package uses the Windows DNS client API but
+    # does not propagate dnsapi.lib through its imported target.
+    if (build_winarm)
+        target_link_libraries(Telegram PRIVATE dnsapi)
+    endif()
+
     target_link_options(Telegram PRIVATE /PDBPAGESIZE:8192)
 elseif (APPLE)
     if (NOT DESKTOP_APP_USE_PACKAGED)
@@ -2639,7 +2649,11 @@ if (NOT DESKTOP_APP_DISABLE_AUTOUPDATE AND NOT build_macstore AND NOT build_wins
         )
     endif()
 
-    if (DESKTOP_APP_SPECIAL_TARGET)
+    # Packer signs update packages and needs the maintainers' private key,
+    # which is deliberately absent from public source checkouts. winarm is a
+    # local cross-build target, so it must not pull Packer into the client
+    # build merely to select its platform settings.
+    if (DESKTOP_APP_SPECIAL_TARGET AND NOT build_winarm)
         add_executable(Packer)
         init_target(Packer)
 
